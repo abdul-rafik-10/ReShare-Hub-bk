@@ -4,3 +4,4 @@ google-generativeai
 pillow
 flask-cors
 gunicorn
+flask-limiter
