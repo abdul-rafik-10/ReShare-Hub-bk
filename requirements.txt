@@ -1,5 +1,6 @@
-Flask==2.3.3
-google-generativeai==0.5.4
-Pillow==10.0.0
-gunicorn==21.2.0
-python-dotenv==1.0.1
+flask
+python-dotenv
+google-generativeai
+pillow
+flask-cors
+gunicorn
