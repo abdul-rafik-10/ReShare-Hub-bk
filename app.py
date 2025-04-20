@@ -8,7 +8,6 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from flask_limiter import Limiter
 
-# Load .env only in development
 if os.environ.get('FLASK_ENV') != 'production':
     load_dotenv()
 
@@ -17,14 +16,13 @@ CORS(app)
 genai.configure(api_key=os.getenv("API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Initialize rate limiter
 limiter = Limiter(
     app=app,
     key_func=lambda: request.remote_addr,
     default_limits=["200 per day", "50 per hour"]
 )
 
-# --------------------- PROMPTS (NO CHANGES) ---------------------
+# --------------------- ORIGINAL PROMPTS (NO CHANGES) ---------------------
 reusability_prompt = """
 You're a smart product evaluator. Based on the image and text description of a second-hand product, determine if this product is reasonably **reusable**.
 
@@ -86,8 +84,18 @@ Description: [Insert 150–200 word description here]
 # --------------------- END PROMPTS ---------------------
 
 def clean_response(text):
-    """Remove markdown formatting from responses"""
     return re.sub(r'\*{2,}|_{2,}', '', text).strip()
+
+def parse_sales_response(text):
+    """Properly parse title and description from response"""
+    try:
+        title_part, desc_part = text.split("Description:", 1)
+        title = title_part.replace("Title:", "").strip()
+        description = desc_part.strip()
+        return title, description
+    except Exception as e:
+        app.logger.error(f"Failed to parse response: {str(e)}")
+        return text.split('\n')[0][:50].strip(), text  # Fallback
 
 @app.route('/generate-content', methods=['POST'])
 @limiter.limit("5 per minute")
@@ -97,7 +105,7 @@ def generate_content():
             return jsonify({'error': 'No image provided'}), 400
 
         img_file = request.files['image']
-        if img_file.content_length > 5 * 1024 * 1024:  # 5MB limit
+        if img_file.content_length > 5 * 1024 * 1024:
             return jsonify({'error': 'Image exceeds 5MB size limit'}), 400
 
         try:
@@ -123,7 +131,8 @@ def generate_content():
         # Description generation
         try:
             desc_response = model.generate_content([sales_pitch_prompt, img])
-            description = clean_response(desc_response.text)
+            raw_description = clean_response(desc_response.text)
+            title, description = parse_sales_response(raw_description)
         except Exception as e:
             return jsonify({'error': f'Description failed: {str(e)}'}), 500
 
@@ -133,8 +142,7 @@ def generate_content():
         try:
             cat_response = model.generate_content([
                 "STRICT FORMAT:\nCategory: <value>\nSubcategory: <value>\n\n"
-                "Analyze image and follow structure exactly. "
-                "Categories: Electronics, Furniture, Appliances, Books, Clothing, Miscellaneous.", 
+                "Analyze image and follow structure exactly.", 
                 img
             ])
             
@@ -143,8 +151,8 @@ def generate_content():
             
             if category_match:
                 category = category_match.group(1).strip().title()
-                valid_categories = ["Electronics", "Furniture", "Appliances", "Books", "Clothing", "Miscellaneous"]
-                category = category if category in valid_categories else "Miscellaneous"
+                valid_cats = ["Electronics", "Furniture", "Appliances", "Books", "Clothing", "Miscellaneous"]
+                category = category if category in valid_cats else "Miscellaneous"
             
             if subcat_match:
                 subcategory = subcat_match.group(1).strip().title()
@@ -152,10 +160,6 @@ def generate_content():
                     subcategory = "Miscellaneous"
         except Exception as e:
             app.logger.error(f'Category error: {str(e)}')
-
-        title = description.split('.')[0][:50].strip()
-        if not title.endswith('.'):
-            title += '...'
 
         return jsonify({
             'reusable': True,
@@ -169,6 +173,9 @@ def generate_content():
     except Exception as e:
         app.logger.error(f'Server error: {str(e)}')
         return jsonify({'error': 'Internal error'}), 500
+
+# Rest of the endpoints remain unchanged...
+# [Keep the /check-reusability and /health endpoints exactly as before]
 
 @app.route('/check-reusability', methods=['POST'])
 @limiter.limit("5 per minute")
