@@ -6,16 +6,25 @@ import os
 import re
 from flask_cors import CORS
 from dotenv import load_dotenv
-load_dotenv()  # Loads .env file
+from flask_limiter import Limiter
+
+# Load .env only in development
+if os.environ.get('FLASK_ENV') != 'production':
+    load_dotenv()
+
 app = Flask(__name__)
 CORS(app)
-print("API_KEY:", os.getenv("API_KEY"))
 genai.configure(api_key=os.getenv("API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Original prompts kept exactly as provided
-# (Keep all three prompts exactly as in your original code here)
-# Prompt templates
+# Initialize rate limiter
+limiter = Limiter(
+    app=app,
+    key_func=lambda: request.remote_addr,
+    default_limits=["200 per day", "50 per hour"]
+)
+
+# --------------------- PROMPTS (NO CHANGES) ---------------------
 reusability_prompt = """
 You're a smart product evaluator. Based on the image and text description of a second-hand product, determine if this product is reasonably **reusable**.
 
@@ -74,26 +83,30 @@ Return your answer in this format:
 Title: [Insert simple 5-word title here]
 Description: [Insert 150–200 word description here]
 """
+# --------------------- END PROMPTS ---------------------
 
 def clean_response(text):
     """Remove markdown formatting from responses"""
     return re.sub(r'\*{2,}|_{2,}', '', text).strip()
 
 @app.route('/generate-content', methods=['POST'])
+@limiter.limit("5 per minute")
 def generate_content():
     try:
         if 'image' not in request.files:
             return jsonify({'error': 'No image provided'}), 400
 
-        # Image processing with error handling
+        img_file = request.files['image']
+        if img_file.content_length > 5 * 1024 * 1024:  # 5MB limit
+            return jsonify({'error': 'Image exceeds 5MB size limit'}), 400
+
         try:
-            img_file = request.files['image']
             img_bytes = img_file.read()
             img = Image.open(io.BytesIO(img_bytes))
         except Exception as e:
-            return jsonify({'error': f'Invalid image file: {str(e)}'}), 400
+            return jsonify({'error': f'Invalid image: {str(e)}'}), 400
 
-        # 1. Enhanced reusability check
+        # Reusability check
         try:
             reuse_response = model.generate_content([reusability_prompt, img])
             reuse_text = clean_response(reuse_response.text)
@@ -104,45 +117,42 @@ def generate_content():
         if not is_reusable:
             return jsonify({
                 'reusable': False,
-                'reason': reuse_text.split('\n')[0][:200]  # Get first line truncated
+                'reason': reuse_text.split('\n')[0][:200]
             })
 
-        # 2. Generate description
+        # Description generation
         try:
             desc_response = model.generate_content([sales_pitch_prompt, img])
             description = clean_response(desc_response.text)
         except Exception as e:
-            return jsonify({'error': f'Description generation failed: {str(e)}'}), 500
+            return jsonify({'error': f'Description failed: {str(e)}'}), 500
 
-        # 3. Robust category extraction
+        # Category parsing
         category = "Miscellaneous"
         subcategory = "Miscellaneous"
         try:
             cat_response = model.generate_content([
                 "STRICT FORMAT:\nCategory: <value>\nSubcategory: <value>\n\n"
-                "Analyze image and follow this structure exactly. "
-                "Categories: Electronics, Furniture, Appliances, Books, Clothing, Miscellaneous. "
-                "Choose closest match.", 
+                "Analyze image and follow structure exactly. "
+                "Categories: Electronics, Furniture, Appliances, Books, Clothing, Miscellaneous.", 
                 img
             ])
             
-            # Regex-based parsing
-            category_match = re.search(r'Category:\s*(.+)', cat_response.text, re.IGNORECASE)
-            subcat_match = re.search(r'Subcategory:\s*(.+)', cat_response.text, re.IGNORECASE)
+            category_match = re.search(r'Category:\s*([^\n]+)', cat_response.text, re.IGNORECASE)
+            subcat_match = re.search(r'Subcategory:\s*([^\n]+)', cat_response.text, re.IGNORECASE)
             
             if category_match:
-                category = category_match.group(1).strip()
+                category = category_match.group(1).strip().title()
                 valid_categories = ["Electronics", "Furniture", "Appliances", "Books", "Clothing", "Miscellaneous"]
                 category = category if category in valid_categories else "Miscellaneous"
             
             if subcat_match:
-                subcategory = subcat_match.group(1).strip()
-                if subcategory.lower() == 'others': 
+                subcategory = subcat_match.group(1).strip().title()
+                if subcategory.lower() in ['others', 'other']:
                     subcategory = "Miscellaneous"
         except Exception as e:
-            app.logger.error(f'Category extraction failed: {str(e)}')
+            app.logger.error(f'Category error: {str(e)}')
 
-        # Generate title from first sentence of description
         title = description.split('.')[0][:50].strip()
         if not title.endswith('.'):
             title += '...'
@@ -153,38 +163,52 @@ def generate_content():
             'description': description,
             'category': category,
             'subcategory': subcategory,
-            'reason': reuse_text[:200]  # Include reusability reason
+            'reason': reuse_text[:200]
         })
 
     except Exception as e:
         app.logger.error(f'Server error: {str(e)}')
-        return jsonify({'error': 'Internal server error'}), 500
+        return jsonify({'error': 'Internal error'}), 500
 
 @app.route('/check-reusability', methods=['POST'])
+@limiter.limit("5 per minute")
 def check_reusability():
     try:
         if 'image' not in request.files:
-            return jsonify({'error': 'No image provided'}), 400
+            return jsonify({'error': 'No image'}), 400
 
-        # Process the image
         img_file = request.files['image']
-        img_bytes = img_file.read()
-        img = Image.open(io.BytesIO(img_bytes))
+        if img_file.content_length > 5 * 1024 * 1024:
+            return jsonify({'error': 'Image too large (max 5MB)'}), 400
 
-        # Use the proper reusability prompt
         try:
-            reuse_response = model.generate_content([reusability_prompt, img])  # Changed here
-            reuse_text = clean_response(reuse_response.text)
-            is_reusable = bool(re.search(r'\byes\b', reuse_text, re.IGNORECASE))
+            img_bytes = img_file.read()
+            img = Image.open(io.BytesIO(img_bytes))
         except Exception as e:
-            return jsonify({'error': f'Reusability check failed: {str(e)}'}), 500
+            return jsonify({'error': f'Invalid image: {str(e)}'}), 400
+
+        try:
+            response = model.generate_content([reusability_prompt, img])
+            text = clean_response(response.text)
+            is_reusable = bool(re.search(r'\byes\b', text, re.IGNORECASE))
+        except Exception as e:
+            return jsonify({'error': f'Check failed: {str(e)}'}), 500
 
         return jsonify({
             'reusable': is_reusable,
-            'reason': reuse_text.split('\n')[0][:200]  # Short explanation
+            'reason': text.split('\n')[0][:200]
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'healthy',
+        'version': '1.0',
+        'dependencies': ['Flask', 'Google-GenerativeAI']
+    })
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
