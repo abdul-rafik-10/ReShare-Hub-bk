@@ -215,6 +215,72 @@ def health_check():
         'version': '1.0',
         'dependencies': ['Flask', 'Google-GenerativeAI']
     })
+@app.route('/check-expiry', methods=['POST'])
+def check_expiry():
+    try:
+        # Get form data and strip extra whitespace
+        food = request.form.get('food', '').strip()
+        quantity = request.form.get('quantity', '').strip()
+        date = request.form.get('date', '').strip()
+        time = request.form.get('time', '').strip()
+
+        # Log received values for debugging
+        print(f"Received - Food: {food}, Quantity: {quantity}, Date: {date}, Time: {time}")
+
+        # Validate required fields
+        if not food or not quantity or not date or not time:
+            return jsonify({
+                'error': 'Missing required fields',
+                'details': 'Please provide food, quantity, date, and time'
+            }), 400
+
+        # Parse datetime correctly
+        try:
+            # Parse the input date and time
+            product_datetime = datetime.strptime(f"{date} {time}", "%d/%m/%Y %I:%M %p")
+            now = datetime.now()
+
+            # Log the parsed values for debugging
+            print(f"Product DateTime: {product_datetime}")
+            print(f"Current DateTime: {now}")
+
+            # Determine if the food is fresh or expired
+            if product_datetime >= now:
+                quality = 'fresh'
+                response_text = {
+                    'status': 'fresh',
+                    'message': 'The food is fresh and safe for reuse.'
+                }
+            else:
+                quality = 'expired'
+                response_text = {
+                    'status': 'expired',
+                    'message': 'The food seems to be expired and should not be reused for safety reasons.'
+                }
+
+            # Return the response
+            return jsonify({
+                'quality': quality,
+                'reusable': quality == 'fresh',
+                'details': response_text,
+                'product_date': product_datetime.strftime("%d/%m/%Y %I:%M %p"),
+                'current_date': now.strftime("%d/%m/%Y %I:%M %p")
+            })
+
+        except ValueError as e:
+            print(f"Date parsing error: {e}")
+            return jsonify({
+                'error': 'Invalid date format',
+                'details': 'Please provide date in DD/MM/YYYY format and time in HH:MM AM/PM format',
+                'example': '25/04/2025 02:30 PM'
+            }), 400
+
+    except Exception as e:
+        print(f"Server error: {e}")
+        return jsonify({
+            'error': 'Internal server error',
+            'details': str(e)
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
